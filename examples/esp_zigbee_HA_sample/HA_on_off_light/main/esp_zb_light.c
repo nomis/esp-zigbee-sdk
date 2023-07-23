@@ -18,6 +18,8 @@
 #include "ha/esp_zigbee_ha_standard.h"
 #include "esp_zb_light.h"
 
+#define LIGHT_ENDPOINTS 35
+
 /**
  * @note Make sure set idf.py menuconfig in zigbee component as zigbee end device!
 */
@@ -32,14 +34,35 @@ static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
     ESP_ERROR_CHECK(esp_zb_bdb_start_top_level_commissioning(mode_mask));
 }
 
+static uint8_t endpoint_values[LIGHT_ENDPOINTS] = { 0 };
+
+static void toggle_endpoint(uint8_t endpoint)
+{
+    uint8_t value = endpoint_values[endpoint - HA_ESP_LIGHT_ENDPOINT] ? 0 : 1;
+
+    ESP_LOGI(TAG, "setting endpoint %u: %d -> %d",
+        endpoint, endpoint_values[endpoint - HA_ESP_LIGHT_ENDPOINT], value);
+
+    endpoint_values[endpoint - HA_ESP_LIGHT_ENDPOINT] = value;
+
+    esp_zb_zcl_set_attribute_val(endpoint, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+        &endpoint_values[endpoint - HA_ESP_LIGHT_ENDPOINT], false);
+}
+
 void attr_cb(uint8_t status, uint8_t endpoint, uint16_t cluster_id, uint16_t attr_id, void *new_value)
 {
     if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF) {
         uint8_t value = *(uint8_t *)new_value;
         if (attr_id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
-            /* implemented light on/off control */
-            ESP_LOGI(TAG, "on/off light set to %hd", value);
-            light_driver_set_power((bool)value);
+            /* store the value for this endpoint, and toggle the next endpoint */
+            uint8_t next_endpoint = (((endpoint - HA_ESP_LIGHT_ENDPOINT) + 1) % LIGHT_ENDPOINTS) + HA_ESP_LIGHT_ENDPOINT;
+
+            ESP_LOGI(TAG, "endpoint %u on/off light set %d -> %d",
+                endpoint, endpoint_values[endpoint - HA_ESP_LIGHT_ENDPOINT], value);
+            esp_zb_scheduler_alarm(toggle_endpoint, next_endpoint, 0);
+
+            endpoint_values[endpoint - HA_ESP_LIGHT_ENDPOINT] = value;
         }
     } else {
         /* Implement some actions if needed when other cluster changed */
@@ -93,9 +116,22 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZED_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
     /* set the on-off light device config */
-    esp_zb_on_off_light_cfg_t light_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
-    esp_zb_ep_list_t *esp_zb_on_off_light_ep = esp_zb_on_off_light_ep_create(HA_ESP_LIGHT_ENDPOINT, &light_cfg);
-    esp_zb_device_register(esp_zb_on_off_light_ep);
+    esp_zb_on_off_cluster_cfg_t light_cfg = {
+		.on_off = ESP_ZB_ZCL_ON_OFF_ON_OFF_DEFAULT_VALUE,
+	};
+
+    esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
+    esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(NULL);
+
+    for (uint i = 0; i < LIGHT_ENDPOINTS; i++) {
+        esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
+
+        esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+        esp_zb_cluster_list_add_on_off_cluster(cluster_list, esp_zb_on_off_cluster_create(&light_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+        esp_zb_ep_list_add_ep(ep_list, cluster_list, HA_ESP_LIGHT_ENDPOINT + i, ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID);
+    }
+
+    esp_zb_device_register(ep_list);
     esp_zb_device_add_set_attr_value_cb(attr_cb);
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
