@@ -38,7 +38,7 @@ void attr_cb(uint8_t status, uint8_t endpoint, uint16_t cluster_id, uint16_t att
         uint8_t value = *(uint8_t *)new_value;
         if (attr_id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
             /* implemented light on/off control */
-            ESP_LOGI(TAG, "on/off light set to %hd", value);
+            ESP_LOGI(TAG, "endpoint %u on/off light set to %hd", endpoint, value);
             light_driver_set_power((bool)value);
         }
     } else {
@@ -93,9 +93,22 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZED_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
     /* set the on-off light device config */
-    esp_zb_on_off_light_cfg_t light_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
-    esp_zb_ep_list_t *esp_zb_on_off_light_ep = esp_zb_on_off_light_ep_create(HA_ESP_LIGHT_ENDPOINT, &light_cfg);
-    esp_zb_device_register(esp_zb_on_off_light_ep);
+    esp_zb_on_off_cluster_cfg_t light_cfg = {
+		.on_off = ESP_ZB_ZCL_ON_OFF_ON_OFF_DEFAULT_VALUE,
+	};
+
+    esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
+    esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(NULL);
+
+    for (uint i = 0; i < 64; i++) {
+        esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
+
+        esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+        esp_zb_cluster_list_add_on_off_cluster(cluster_list, esp_zb_on_off_cluster_create(&light_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+        esp_zb_ep_list_add_ep(ep_list, cluster_list, HA_ESP_LIGHT_ENDPOINT + i, ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID);
+    }
+
+    esp_zb_device_register(ep_list);
     esp_zb_device_add_set_attr_value_cb(attr_cb);
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
